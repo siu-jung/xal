@@ -42,11 +42,24 @@ xal_be_fiemap_close(struct xal *xal)
 
 	be = (struct xal_be_fiemap *)xal->be;
 
-	free(be->mountpoint);
-
 	if (be->inotify) {
 		xal_be_fiemap_inotify_close(be->inotify);
+	} else {
+		int fd = open(be->mountpoint, O_RDONLY | O_DIRECTORY);
+
+		if (fd >= 0) {
+			if(ioctl(fd, FITHAW, 0) < 0) {
+				XAL_DEBUG("INFO: could not thaw filesystem; maybe nothing to thaw?");
+			} else {
+				XAL_DEBUG("INFO: thawed filesystem");
+			}
+			close(fd);
+		} else {
+			XAL_DEBUG("FAILED: could not open() fs mountpoint for thaw");
+		}
 	}
+
+	free(be->mountpoint);
 
 	inode_map = be->path_inode_map;
 
@@ -175,6 +188,25 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 			XAL_DEBUG("FAILED: xal_be_fiemap_inotify_init()");
 			goto failed;
 		}
+	} else {
+		// since fs is mounted without a watch mode, freeze it
+		int fd = open(mountpoint, O_RDONLY | O_DIRECTORY);
+
+		if (fd < 0) {
+			XAL_DEBUG("FAILED: open(); errno(%d)", errno);
+			err = -errno;
+			goto failed;
+		}
+
+		// when ioctl returns, fs is fully frozen
+		err = ioctl(fd, FIFREEZE, 0);
+		if (err < 0) {
+			close(fd);
+			XAL_DEBUG("FAILED: could not freeze filesystem; err(%d)", err);
+			goto failed;
+		}
+		close(fd);
+		XAL_DEBUG("INFO: freezed filesystem");
 	}
 
 	nallocated = retrieve_total_entries(be->mountpoint);
