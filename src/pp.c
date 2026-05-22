@@ -179,32 +179,39 @@ xal_inode_pp(struct xal *xal, struct xal_inode *inode)
 	wrtn += printf("  ftype: %" PRIu8 "\n", inode->ftype);
 
 	switch (inode->ftype) {
-	case XAL_ODF_DIR3_FT_DIR:
-		struct xal_inode *children = xal_inode_at(xal, inode->content.dentries.inodes_idx);
+	case XAL_ODF_DIR3_FT_DIR: {
+		struct xal_dentry_iter it;
+		struct xal_inode *child;
 
 		wrtn += printf("  dentries.count: %u\n", inode->content.dentries.count);
 
-		for (uint8_t i = 0; i < inode->content.dentries.count; ++i) {
-			xal_inode_pp(xal, &children[i]);
+		xal_dentry_iter_init(&it, xal, &inode->content.dentries);
+		while ((child = xal_dentry_iter_next(&it))) {
+			xal_inode_pp(xal, child);
 		}
 
 		break;
+	}
 
-	case XAL_ODF_DIR3_FT_REG_FILE:
+	case XAL_ODF_DIR3_FT_REG_FILE: {
 		uint32_t blocksize = xal_get_sb_blocksize(xal);
-		wrtn += printf("  extents.count: %u\n", inode->content.extents.count);
-		for (uint32_t i = 0; i < inode->content.extents.count; ++i) {
-			struct xal_extent *extent = xal_extent_at(xal, inode->content.extents.extent_idx + i);
-	        size_t fofz_begin, fofz_end, bofz_begin, bofz_end;
+		struct xal_extent_iter it;
+		struct xal_extent *extent;
 
-	        fofz_begin = (extent->start_offset * blocksize) / BMAP_BLOCK_SIZE;
-	        fofz_end = fofz_begin + (extent->nblocks * blocksize) / BMAP_BLOCK_SIZE - 1;
-	        bofz_begin = xal_fsbno_offset(xal, extent->start_block) / BMAP_BLOCK_SIZE;
-	        bofz_end = bofz_begin + (extent->nblocks * blocksize) / BMAP_BLOCK_SIZE - 1;
+		wrtn += printf("  extents.count: %u\n", inode->content.extents.count);
+		xal_extent_iter_init(&it, xal, &inode->content.extents);
+		while ((extent = xal_extent_iter_next(&it))) {
+			size_t fofz_begin, fofz_end, bofz_begin, bofz_end;
+
+			fofz_begin = (extent->start_offset * blocksize) / BMAP_BLOCK_SIZE;
+			fofz_end = fofz_begin + (extent->nblocks * blocksize) / BMAP_BLOCK_SIZE - 1;
+			bofz_begin = xal_fsbno_offset(xal, extent->start_block) / BMAP_BLOCK_SIZE;
+			bofz_end = bofz_begin + (extent->nblocks * blocksize) / BMAP_BLOCK_SIZE - 1;
 			wrtn += printf("- [%" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %"
 				    PRIu64 "]\n", fofz_begin, fofz_end, bofz_begin, bofz_end);
 		}
 		break;
+	}
 	}
 
 	fflush(stdout);

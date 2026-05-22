@@ -112,9 +112,11 @@ static int
 pp_inode_extents(struct xal *xal, struct xal_inode *inode)
 {
 	uint32_t blocksize = xal_get_sb_blocksize(xal);
+	struct xal_extent_iter it;
+	struct xal_extent *extent;
 
-	for (uint32_t i = 0; i < inode->content.extents.count; ++i) {
-		struct xal_extent *extent = xal_extent_at(xal, inode->content.extents.extent_idx + i);
+	xal_extent_iter_init(&it, xal, &inode->content.extents);
+	while ((extent = xal_extent_iter_next(&it))) {
 		size_t fofz_begin, fofz_end, bofz_begin, bofz_end;
 
 		fofz_begin = (extent->start_offset * blocksize) / 512;
