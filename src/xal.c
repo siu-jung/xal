@@ -57,10 +57,16 @@ xal_inode_at(struct xal *xal, uint32_t idx)
 	return (struct xal_inode *)xal->inodes.memory + idx;
 }
 
-struct xal_extent *
-xal_extent_at(struct xal *xal, uint32_t idx)
+struct xal_dentry_block *
+xal_dentry_block_at(struct xal *xal, uint32_t idx)
 {
-	return (struct xal_extent *)xal->extents.memory + idx;
+	return (struct xal_dentry_block *)xal->dentry_blocks.memory + idx;
+}
+
+struct xal_extent_block *
+xal_extent_block_at(struct xal *xal, uint32_t idx)
+{
+	return (struct xal_extent_block *)xal->extent_blocks.memory + idx;
 }
 
 uint32_t
@@ -69,9 +75,183 @@ xal_inode_idx(struct xal *xal, struct xal_inode *inode)
 	return (uint32_t)(inode - (struct xal_inode *)xal->inodes.memory);
 }
 
+void
+xal_dentry_iter_init(struct xal_dentry_iter *it, struct xal *xal, const struct xal_dentries *d)
+{
+	it->xal = xal;
+	it->block_idx = (d && d->count) ? d->first_block_idx : XAL_POOL_IDX_NONE;
+	it->pos = 0;
+}
+
+struct xal_inode *
+xal_dentry_iter_next(struct xal_dentry_iter *it)
+{
+	while (it->block_idx != XAL_POOL_IDX_NONE) {
+		struct xal_dentry_block *blk = xal_dentry_block_at(it->xal, it->block_idx);
+
+		if (it->pos < blk->count) {
+			uint32_t inode_idx = blk->inode_idx[it->pos];
+			it->pos += 1;
+			return xal_inode_at(it->xal, inode_idx);
+		}
+
+		it->block_idx = blk->next_idx;
+		it->pos = 0;
+	}
+
+	return NULL;
+}
+
+void
+xal_extent_iter_init(struct xal_extent_iter *it, struct xal *xal, const struct xal_extents *e)
+{
+	it->xal = xal;
+	it->block_idx = (e && e->count) ? e->first_block_idx : XAL_POOL_IDX_NONE;
+	it->pos = 0;
+}
+
+struct xal_extent *
+xal_extent_iter_next(struct xal_extent_iter *it)
+{
+	while (it->block_idx != XAL_POOL_IDX_NONE) {
+		struct xal_extent_block *blk = xal_extent_block_at(it->xal, it->block_idx);
+
+		if (it->pos < blk->count) {
+			struct xal_extent *e = &blk->slots[it->pos];
+			it->pos += 1;
+			return e;
+		}
+
+		it->block_idx = blk->next_idx;
+		it->pos = 0;
+	}
+
+	return NULL;
+}
+
+int
+xal_dentries_append(struct xal *xal, struct xal_dentries *dentries, uint32_t child_idx)
+{
+	struct xal_dentry_block *tail = NULL;
+	uint32_t tail_idx = dentries->first_block_idx;
+
+	if (tail_idx != XAL_POOL_IDX_NONE) {
+		tail = xal_dentry_block_at(xal, tail_idx);
+		while (tail->next_idx != XAL_POOL_IDX_NONE) {
+			tail_idx = tail->next_idx;
+			tail = xal_dentry_block_at(xal, tail_idx);
+		}
+	}
+
+	if (!tail || tail->count == XAL_DENTRY_BLOCK_CAP) {
+		uint32_t new_idx;
+		struct xal_dentry_block *blk;
+		int err = xal_pool_claim_one(&xal->dentry_blocks, &new_idx);
+
+		if (err) {
+			XAL_DEBUG("FAILED: xal_pool_claim_one(dentry_blocks); err(%d)", err);
+			return err;
+		}
+
+		blk = xal_dentry_block_at(xal, new_idx);
+		blk->next_idx = XAL_POOL_IDX_NONE;
+		blk->count = 0;
+
+		if (tail) {
+			tail->next_idx = new_idx;
+		} else {
+			dentries->first_block_idx = new_idx;
+		}
+		tail = blk;
+	}
+
+	tail->inode_idx[tail->count] = child_idx;
+	tail->count += 1;
+	dentries->count += 1;
+
+	return 0;
+}
+
+void
+xal_dentries_release(struct xal *xal, struct xal_dentries *dentries)
+{
+	uint32_t cur = dentries->first_block_idx;
+
+	while (cur != XAL_POOL_IDX_NONE) {
+		struct xal_dentry_block *blk = xal_dentry_block_at(xal, cur);
+		uint32_t next = blk->next_idx;
+
+		xal_pool_release_one(&xal->dentry_blocks, cur);
+		cur = next;
+	}
+
+	dentries->first_block_idx = XAL_POOL_IDX_NONE;
+	dentries->count = 0;
+}
+
+int
+xal_extents_append(struct xal *xal, struct xal_extents *extents, const struct xal_extent *e)
+{
+	struct xal_extent_block *tail = NULL;
+	uint32_t tail_idx = extents->first_block_idx;
+
+	if (tail_idx != XAL_POOL_IDX_NONE) {
+		tail = xal_extent_block_at(xal, tail_idx);
+		while (tail->next_idx != XAL_POOL_IDX_NONE) {
+			tail_idx = tail->next_idx;
+			tail = xal_extent_block_at(xal, tail_idx);
+		}
+	}
+
+	if (!tail || tail->count == XAL_EXTENT_BLOCK_CAP) {
+		uint32_t new_idx;
+		struct xal_extent_block *blk;
+		int err = xal_pool_claim_one(&xal->extent_blocks, &new_idx);
+
+		if (err) {
+			XAL_DEBUG("FAILED: xal_pool_claim_one(extent_blocks); err(%d)", err);
+			return err;
+		}
+
+		blk = xal_extent_block_at(xal, new_idx);
+		blk->next_idx = XAL_POOL_IDX_NONE;
+		blk->count = 0;
+
+		if (tail) {
+			tail->next_idx = new_idx;
+		} else {
+			extents->first_block_idx = new_idx;
+		}
+		tail = blk;
+	}
+
+	tail->slots[tail->count] = *e;
+	tail->count += 1;
+	extents->count += 1;
+
+	return 0;
+}
+
+void
+xal_extents_release(struct xal *xal, struct xal_extents *extents)
+{
+	uint32_t cur = extents->first_block_idx;
+
+	while (cur != XAL_POOL_IDX_NONE) {
+		struct xal_extent_block *blk = xal_extent_block_at(xal, cur);
+		uint32_t next = blk->next_idx;
+
+		xal_pool_release_one(&xal->extent_blocks, cur);
+		cur = next;
+	}
+
+	extents->first_block_idx = XAL_POOL_IDX_NONE;
+	extents->count = 0;
+}
+
 int
 xal_from_pools(const struct xal_sb *sb, const char *mountpoint, void *inodes_mem,
-	void *extents_mem, _Atomic bool *dirty, struct xal **out)
+	void *dentry_blocks_mem, void *extent_blocks_mem, _Atomic bool *dirty, struct xal **out)
 {
 	struct xal *xal;
 
@@ -104,8 +284,11 @@ xal_from_pools(const struct xal_sb *sb, const char *mountpoint, void *inodes_mem
 	xal->inodes.memory = inodes_mem;
 	xal->inodes.element_size = sizeof(struct xal_inode);
 
-	xal->extents.memory = extents_mem;
-	xal->extents.element_size = sizeof(struct xal_extent);
+	xal->dentry_blocks.memory = dentry_blocks_mem;
+	xal->dentry_blocks.element_size = sizeof(struct xal_dentry_block);
+
+	xal->extent_blocks.memory = extent_blocks_mem;
+	xal->extent_blocks.element_size = sizeof(struct xal_extent_block);
 
 	*out = xal;
 
@@ -131,7 +314,8 @@ xal_close(struct xal *xal)
 	}
 
 	xal_pool_unmap(&xal->inodes);
-	xal_pool_unmap(&xal->extents);
+	xal_pool_unmap(&xal->dentry_blocks);
+	xal_pool_unmap(&xal->extent_blocks);
 
 	if (xal->dirty != &xal->_dirty_storage) {
 		munmap(xal->dirty, sizeof(atomic_bool));
@@ -327,10 +511,12 @@ _walk(struct xal *xal, struct xal_inode *inode, xal_walk_cb cb_func, void *cb_da
 
 	switch (inode->ftype) {
 	case XAL_ODF_DIR3_FT_DIR: {
-		struct xal_inode *inodes = xal_inode_at(xal, inode->content.dentries.inodes_idx);
+		struct xal_dentry_iter it;
+		struct xal_inode *child;
 
-		for (uint32_t i = 0; i < inode->content.dentries.count; ++i) {
-			err = _walk(xal, &inodes[i], cb_func, cb_data, depth + 1);
+		xal_dentry_iter_init(&it, xal, &inode->content.dentries);
+		while ((child = xal_dentry_iter_next(&it))) {
+			err = _walk(xal, child, cb_func, cb_data, depth + 1);
 			if (err) {
 				return err;
 			}
