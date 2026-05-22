@@ -62,7 +62,7 @@ Backend is auto-detected: if the device is mounted, FIEMAP is used; otherwise XF
 
 ### Memory pools (`struct xal_pool`)
 
-Inodes and extents are stored in separate contiguous pools backed by `mmap`. Pools reserve a large virtual range with `PROT_NONE` and commit pages lazily via `mprotect`. Elements are accessed by index (`xal_inode_at(xal, idx)`), never by pointer, so indices stay stable. Pools can optionally use POSIX shared memory (`shm_name` option) for cross-process sharing via `xal_from_pools()`.
+Three pools backed by `mmap`: `inodes`, `dentry_blocks` (chained child-index blocks), `extent_blocks` (chained inline-extent blocks). Pools reserve a large virtual range with `PROT_NONE` and commit pages lazily via `mprotect`. Elements are accessed by index, never by pointer. The pool API supports both bump-allocation (`xal_pool_claim_contig`) and per-element claim/release with an intrusive freelist (`xal_pool_claim_one` / `xal_pool_release_one`). Variable-length per-inode data (children, extents) lives in chained fixed-size blocks; iterate with `xal_dentry_iter_*` / `xal_extent_iter_*`. The FIEMAP backend's `XAL_WATCHMODE_EXTENT_UPDATE` reuses freed extent-blocks, so live updates do not leak. Pools can optionally use POSIX shared memory (`shm_name` option, suffixes `_inodes`, `_dblks`, `_eblks`, `_dirty`) for cross-process sharing via `xal_from_pools()`.
 
 ### Key internal types
 
