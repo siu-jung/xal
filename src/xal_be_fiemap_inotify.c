@@ -240,12 +240,16 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				XAL_DEBUG("INFO: got full path of event: %s", path);
 				atomic_fetch_add(&xal->seq_lock, 1);
 
-				for (uint32_t j = 0; j < dir_inode->content.dentries.count; ++j) {
-					struct xal_inode *child = xal_inode_at(xal, dir_inode->content.dentries.inodes_idx + j);
+				{
+					struct xal_dentry_iter it;
+					struct xal_inode *child;
 
-					if (strcmp(child->name, path) == 0) {
-						inode = child;
-						break;
+					xal_dentry_iter_init(&it, xal, &dir_inode->content.dentries);
+					while ((child = xal_dentry_iter_next(&it))) {
+						if (strcmp(child->name, path) == 0) {
+							inode = child;
+							break;
+						}
 					}
 				}
 

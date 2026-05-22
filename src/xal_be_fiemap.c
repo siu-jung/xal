@@ -245,12 +245,25 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 
 	shm = NULL;
 	if (opts->shm_name) {
-		snprintf(shm_name, sizeof(shm_name), "%s_extents", opts->shm_name);
+		snprintf(shm_name, sizeof(shm_name), "%s_dblks", opts->shm_name);
 		shm = shm_name;
 	}
-	err = xal_pool_map(&cand->extents, 40000000UL, nallocated, sizeof(struct xal_extent), shm);
+	err = xal_pool_map(&cand->dentry_blocks, 8000000UL, nallocated,
+	                   sizeof(struct xal_dentry_block), shm);
 	if (err) {
-		XAL_DEBUG("FAILED: xal_pool_map(extents); err(%d)", err);
+		XAL_DEBUG("FAILED: xal_pool_map(dentry_blocks); err(%d)", err);
+		goto failed;
+	}
+
+	shm = NULL;
+	if (opts->shm_name) {
+		snprintf(shm_name, sizeof(shm_name), "%s_eblks", opts->shm_name);
+		shm = shm_name;
+	}
+	err = xal_pool_map(&cand->extent_blocks, 8000000UL, nallocated,
+	                   sizeof(struct xal_extent_block), shm);
+	if (err) {
+		XAL_DEBUG("FAILED: xal_pool_map(extent_blocks); err(%d)", err);
 		goto failed;
 	}
 
@@ -347,27 +360,33 @@ xal_be_fiemap_process_inode_dir(struct xal *xal, char *path, struct xal_inode *i
 
 	qsort(entries, n_entries, sizeof(*entries), compare_dirent);
 
-	err = xal_pool_claim_inodes(&xal->inodes, n_entries, &inode->content.dentries.inodes_idx);
-	if (err) {
-		XAL_DEBUG("FAILED: xal_pool_claim_inodes(); err(%d)", err);
-		goto exit;
-	}
-	inode->content.dentries.count = 0;
-
 	/* Actually process directory entries */
 	for (size_t i = 0; i < n_entries; i++) {
 		char *entry_name = entries[i];
-
-		struct xal_inode *dentry = xal_inode_at(xal, inode->content.dentries.inodes_idx + inode->content.dentries.count);
+		struct xal_inode *dentry;
+		uint32_t child_idx;
 
 		char dentry_path[strlen(path) + 1 + strlen(entry_name) + 1];
 		snprintf(dentry_path, sizeof(dentry_path), "%s/%s", path, entry_name);
 
+		err = xal_pool_claim_one(&xal->inodes, &child_idx);
+		if (err) {
+			XAL_DEBUG("FAILED: xal_pool_claim_one(inodes); err(%d)", err);
+			goto exit;
+		}
+
+		dentry = xal_inode_at(xal, child_idx);
 		strcpy(dentry->name, dentry_path);
 		dentry->namelen = strlen(dentry->name);
 		dentry->parent_idx = xal_inode_idx(xal, inode);
+		dentry->content.extents.first_block_idx = XAL_POOL_IDX_NONE;
+		dentry->content.dentries.first_block_idx = XAL_POOL_IDX_NONE;
 
-		inode->content.dentries.count += 1;
+		err = xal_dentries_append(xal, &inode->content.dentries, child_idx);
+		if (err) {
+			XAL_DEBUG("FAILED: xal_dentries_append(); err(%d)", err);
+			goto exit;
+		}
 
 		err = process_ino_fiemap(xal, dentry_path, dentry);
 		if (err) {
@@ -482,25 +501,20 @@ xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *
 		goto failed;
 	}
 
-	if (fiemap->fm_mapped_extents > 0) {
-		struct xal_extents *extents;
+	xal_extents_release(xal, &inode->content.extents);
 
-		err = xal_pool_claim_extents(&xal->extents, fiemap->fm_mapped_extents, &inode->content.extents.extent_idx);
+	for (uint32_t i = 0; i < fiemap->fm_mapped_extents; i++) {
+		struct xal_extent extent = {
+		    .start_offset = fiemap->fm_extents[i].fe_logical / xal->sb.blocksize,
+		    .start_block  = fiemap->fm_extents[i].fe_physical / xal->sb.blocksize,
+		    .nblocks      = fiemap->fm_extents[i].fe_length / xal->sb.blocksize,
+		    .flag         = fiemap->fm_extents[i].fe_flags,
+		};
+
+		err = xal_extents_append(xal, &inode->content.extents, &extent);
 		if (err) {
-			XAL_DEBUG("FAILED: xal_pool_claim_extents(); err(%d)", err);
+			XAL_DEBUG("FAILED: xal_extents_append(); err(%d)", err);
 			goto failed;
-		}
-
-		extents = &inode->content.extents;
-		extents->count = fiemap->fm_mapped_extents;
-
-		for (uint32_t i = 0; i < extents->count; i++) {
-			struct xal_extent *extent = xal_extent_at(xal, extents->extent_idx + i);
-
-			extent->start_offset = fiemap->fm_extents[i].fe_logical / xal->sb.blocksize;
-			extent->start_block  = fiemap->fm_extents[i].fe_physical / xal->sb.blocksize;
-			extent->nblocks      = fiemap->fm_extents[i].fe_length / xal->sb.blocksize;
-			extent->flag         = fiemap->fm_extents[i].fe_flags;
 		}
 	}
 
@@ -603,7 +617,8 @@ xal_be_fiemap_index(struct xal *xal)
 	atomic_fetch_add(&xal->seq_lock, 1);
 
 	xal_pool_clear(&xal->inodes);
-	xal_pool_clear(&xal->extents);
+	xal_pool_clear(&xal->dentry_blocks);
+	xal_pool_clear(&xal->extent_blocks);
 
 	if (be->inotify) {
 		err = xal_be_fiemap_inotify_clear_inode_map(be->inotify);
@@ -613,9 +628,9 @@ xal_be_fiemap_index(struct xal *xal)
 		}
 	}
 
-	err = xal_pool_claim_inodes(&xal->inodes, 1, &xal->root_idx);
+	err = xal_pool_claim_one(&xal->inodes, &xal->root_idx);
 	if (err) {
-		XAL_DEBUG("FAILED: xal_pool_claim_inodes(); err(%d)", err);
+		XAL_DEBUG("FAILED: xal_pool_claim_one(inodes); err(%d)", err);
 		goto exit;
 	}
 
@@ -624,7 +639,9 @@ xal_be_fiemap_index(struct xal *xal)
 	root->ftype = XAL_ODF_DIR3_FT_DIR;
 	root->namelen = 0;
 	root->parent_idx = XAL_POOL_IDX_NONE;
+	root->content.extents.first_block_idx = XAL_POOL_IDX_NONE;
 	root->content.extents.count = 0;
+	root->content.dentries.first_block_idx = XAL_POOL_IDX_NONE;
 	root->content.dentries.count = 0;
 
 	err = process_ino_fiemap(xal, be->mountpoint, root);
@@ -641,20 +658,22 @@ exit:
 	return err;
 }
 
-static int
-compare_name_to_inode(const void *key, const void *elem)
+static struct xal_inode *
+find_child_by_basename(struct xal *xal, struct xal_inode *parent, const char *component)
 {
-	const char *component = key;
-	const struct xal_inode *inode = elem;
+	struct xal_dentry_iter it;
+	struct xal_inode *child;
 
-	const char *basename = strrchr(inode->name, '/');
-	if (basename) {
-		basename++;
-	} else {
-		basename = inode->name;
+	xal_dentry_iter_init(&it, xal, &parent->content.dentries);
+	while ((child = xal_dentry_iter_next(&it))) {
+		const char *basename = strrchr(child->name, '/');
+		basename = basename ? basename + 1 : child->name;
+		if (strcmp(component, basename) == 0) {
+			return child;
+		}
 	}
 
-	return strcmp(component, basename);
+	return NULL;
 }
 
 static int
@@ -698,8 +717,7 @@ search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, struct 
 
 		XAL_DEBUG("Searching for component(%s)", component);
 
-		child = bsearch(component, xal_inode_at(xal, search->content.dentries.inodes_idx),
-				search->content.dentries.count, sizeof(struct xal_inode), compare_name_to_inode);
+		child = find_child_by_basename(xal, search, component);
 
 		if (!child) {
 			XAL_DEBUG("Component(%s) not found", component);
@@ -745,9 +763,11 @@ build_hashmap_walk(struct xal *xal, struct xal_inode *inode)
 	}
 
 	if (xal_inode_is_dir(inode)) {
-		for (uint32_t i = 0; i < inode->content.dentries.count; i++) {
-			struct xal_inode *child = xal_inode_at(xal, inode->content.dentries.inodes_idx + i);
+		struct xal_dentry_iter it;
+		struct xal_inode *child;
 
+		xal_dentry_iter_init(&it, xal, &inode->content.dentries);
+		while ((child = xal_dentry_iter_next(&it))) {
 			err = build_hashmap_walk(xal, child);
 			if (err) {
 				return err;
