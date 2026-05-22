@@ -88,14 +88,26 @@ xal_extent_converted_pp(struct xal_extent_converted *extent);
 
 struct xal_inode;
 
+/**
+ * Capacity of a single dentry-block. Each block stores up to this many child inode indices
+ * before the chain has to grow with another block. Tune for cache-friendliness.
+ */
+#define XAL_DENTRY_BLOCK_CAP 14
+
+/**
+ * Capacity of a single extent-block. Each block stores up to this many extents inline before
+ * the chain has to grow with another block.
+ */
+#define XAL_EXTENT_BLOCK_CAP 8
+
 struct xal_dentries {
-	uint32_t inodes_idx; ///< Index of first child in xal->inodes pool
-	uint32_t count;      ///< Number of children; for directories
+	uint32_t first_block_idx; ///< Index of first dentry-block in xal->dentry_blocks pool, or XAL_POOL_IDX_NONE
+	uint32_t count;           ///< Total number of children across the chain
 };
 
 struct xal_extents {
-	uint32_t extent_idx; ///< Index of first extent in xal->extents pool
-	uint32_t count;      ///< Number of extents
+	uint32_t first_block_idx; ///< Index of first extent-block in xal->extent_blocks pool, or XAL_POOL_IDX_NONE
+	uint32_t count;           ///< Total number of extents across the chain
 };
 
 union xal_inode_content {
@@ -113,6 +125,26 @@ struct xal_inode {
 	uint8_t reserved[22];
 	uint32_t parent_idx;
 };
+
+/**
+ * A dentry-block. Inside the dentry_blocks pool. Holds child indices into the inodes pool.
+ * The first uint32_t doubles as the freelist link when the block is free.
+ */
+struct xal_dentry_block {
+	uint32_t next_idx;                              ///< Next block in chain, or XAL_POOL_IDX_NONE
+	uint32_t count;                                 ///< Used slots in this block
+	uint32_t inode_idx[XAL_DENTRY_BLOCK_CAP];       ///< Child indices into xal->inodes
+};
+
+/**
+ * An extent-block. Inside the extent_blocks pool. Holds extents inline.
+ * The first uint32_t doubles as the freelist link when the block is free.
+ */
+struct xal_extent_block {
+	uint32_t next_idx;                              ///< Next block in chain, or XAL_POOL_IDX_NONE
+	uint32_t count;                                 ///< Used slots in this block
+	struct xal_extent slots[XAL_EXTENT_BLOCK_CAP];  ///< Inline extents
+} __attribute__((aligned(8)));
 
 /**
  * XAL
@@ -144,11 +176,47 @@ struct xal_sb {
 struct xal_inode *
 xal_inode_at(struct xal *xal, uint32_t idx);
 
-struct xal_extent *
-xal_extent_at(struct xal *xal, uint32_t idx);
+struct xal_dentry_block *
+xal_dentry_block_at(struct xal *xal, uint32_t idx);
+
+struct xal_extent_block *
+xal_extent_block_at(struct xal *xal, uint32_t idx);
 
 uint32_t
 xal_inode_idx(struct xal *xal, struct xal_inode *inode);
+
+/**
+ * Iterator over the chained children of a directory inode.
+ *
+ * Initialize with xal_dentry_iter_init(); advance with xal_dentry_iter_next() which returns
+ * a pointer to the next child inode or NULL when the chain is exhausted.
+ */
+struct xal_dentry_iter {
+	struct xal *xal;
+	uint32_t block_idx;
+	uint32_t pos;
+};
+
+void
+xal_dentry_iter_init(struct xal_dentry_iter *it, struct xal *xal, const struct xal_dentries *d);
+
+struct xal_inode *
+xal_dentry_iter_next(struct xal_dentry_iter *it);
+
+/**
+ * Iterator over the chained extents of a regular-file inode.
+ */
+struct xal_extent_iter {
+	struct xal *xal;
+	uint32_t block_idx;
+	uint32_t pos;
+};
+
+void
+xal_extent_iter_init(struct xal_extent_iter *it, struct xal *xal, const struct xal_extents *e);
+
+struct xal_extent *
+xal_extent_iter_next(struct xal_extent_iter *it);
 
 int
 xal_inode_pp(struct xal *xal, struct xal_inode *inode);
@@ -254,19 +322,21 @@ xal_close(struct xal *xal);
  * The resulting xal can be closed with xal_close(), which will free the struct xal allocation but
  * will not munmap or unlink the pool memory regions — that remains the caller's responsibility.
  *
- * @param sb           Superblock metadata
- * @param mountpoint   Mountpoint of the file system
- * @param inodes_mem   Pointer to the mapped inode pool memory; the root inode must be at index 0
- * @param extents_mem  Pointer to the mapped extent pool memory
- * @param dirty        Pointer to an atomic bool in shared memory used as the dirty flag; typically
- *                     the mapping of the {shm_name}_dirty region created by the producer
- * @param out          Output pointer for the constructed xal
+ * @param sb                 Superblock metadata
+ * @param mountpoint         Mountpoint of the file system
+ * @param inodes_mem         Pointer to the mapped inode pool memory; the root inode must be at index 0
+ * @param dentry_blocks_mem  Pointer to the mapped dentry-block pool memory
+ * @param extent_blocks_mem  Pointer to the mapped extent-block pool memory
+ * @param dirty              Pointer to an atomic bool in shared memory used as the dirty flag;
+ *                           typically the mapping of the {shm_name}_dirty region created by the
+ *                           producer
+ * @param out                Output pointer for the constructed xal
  *
  * @return On success, 0. On error, negative errno.
  */
 int
 xal_from_pools(const struct xal_sb *sb, const char *mountpoint, void *inodes_mem,
-	void *extents_mem, _Atomic bool *dirty, struct xal **out);
+	void *dentry_blocks_mem, void *extent_blocks_mem, _Atomic bool *dirty, struct xal **out);
 
 /**
  * Retrieve inodes from disk and decode the on-disk-format of the retrieved data
