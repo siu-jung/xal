@@ -15,18 +15,17 @@ xal_pool_unmap(struct xal_pool *pool)
 	return munmap(pool->memory, pool->reserved * pool->element_size);
 }
 
-int
+static int
 xal_pool_grow(struct xal_pool *pool, size_t growby)
 {
 	size_t growby_nbytes = growby * pool->element_size;
-	size_t allocated_nbytes = growby_nbytes + pool->allocated * pool->element_size;
-	uint8_t *cursor = pool->memory;
+	uint8_t *tail = (uint8_t *)pool->memory + pool->allocated * pool->element_size;
 
-	if (mprotect(pool->memory, allocated_nbytes, PROT_READ | PROT_WRITE)) {
+	if (mprotect(tail, growby_nbytes, PROT_READ | PROT_WRITE)) {
 		XAL_DEBUG("FAILED: mprotect(...); errno(%d)", errno);
 		return -errno;
 	}
-	memset(&cursor[pool->free * pool->element_size], 0, growby_nbytes);
+	memset(tail, 0, growby_nbytes);
 
 	pool->allocated += growby;
 
@@ -45,9 +44,15 @@ xal_pool_map(struct xal_pool *pool, size_t reserved, size_t allocated, size_t el
 		return -EINVAL;
 	}
 
+	if (element_size < sizeof(uint32_t)) {
+		XAL_DEBUG("FAILED: element_size(%zu) too small for freelist link", element_size);
+		return -EINVAL;
+	}
+
 	pool->reserved = reserved;
 	pool->element_size = element_size;
 	pool->free = 0;
+	pool->freelist_head = XAL_POOL_IDX_NONE;
 
 	if (shm_name) {
 		int fd;
@@ -102,17 +107,65 @@ xal_pool_map(struct xal_pool *pool, size_t reserved, size_t allocated, size_t el
 	return 0;
 }
 
+static void *
+slot_at(struct xal_pool *pool, uint32_t idx)
+{
+	return (uint8_t *)pool->memory + (size_t)idx * pool->element_size;
+}
+
 int
-xal_pool_claim_inodes(struct xal_pool *pool, size_t count, uint32_t *idx)
+xal_pool_claim_one(struct xal_pool *pool, uint32_t *idx)
 {
 	int err;
 
+	if (pool->freelist_head != XAL_POOL_IDX_NONE) {
+		uint32_t slot = pool->freelist_head;
+		uint32_t *link = slot_at(pool, slot);
+
+		pool->freelist_head = *link;
+		memset(link, 0, pool->element_size);
+
+		if (idx) {
+			*idx = slot;
+		}
+		return 0;
+	}
+
+	if (pool->free >= pool->allocated) {
+		err = xal_pool_grow(pool, pool->growby);
+		if (err) {
+			XAL_DEBUG("FAILED: xal_pool_grow(); err(%d)", err);
+			return err;
+		}
+	}
+
+	if (pool->free >= UINT32_MAX) {
+		XAL_DEBUG("FAILED: pool->free exceeds uint32_t range");
+		return -EOVERFLOW;
+	}
+
+	if (idx) {
+		*idx = (uint32_t)pool->free;
+	}
+	pool->free += 1;
+
+	return 0;
+}
+
+int
+xal_pool_claim_contig(struct xal_pool *pool, size_t count, uint32_t *idx)
+{
+	int err;
+
+	if (count == 0) {
+		return -EINVAL;
+	}
 	if (count > pool->growby) {
 		XAL_DEBUG("FAILED: count > pool->growby");
 		return -EINVAL;
 	}
 
-	if (pool->allocated <= (pool->free + count)) {
+	if (pool->allocated < (pool->free + count)) {
 		err = xal_pool_grow(pool, pool->growby);
 		if (err) {
 			XAL_DEBUG("FAILED: xal_pool_grow(); err(%d)", err);
@@ -126,7 +179,7 @@ xal_pool_claim_inodes(struct xal_pool *pool, size_t count, uint32_t *idx)
 	}
 
 	if (idx) {
-		*idx = pool->free;
+		*idx = (uint32_t)pool->free;
 	}
 	pool->free += count;
 
@@ -134,27 +187,18 @@ xal_pool_claim_inodes(struct xal_pool *pool, size_t count, uint32_t *idx)
 }
 
 int
-xal_pool_claim_extents(struct xal_pool *pool, size_t count, uint32_t *idx)
+xal_pool_release_one(struct xal_pool *pool, uint32_t idx)
 {
-	int err;
+	uint32_t *link;
 
-	if (count > pool->growby) {
-		XAL_DEBUG("FAILED: count > pool->growby");
+	if (idx >= pool->free) {
+		XAL_DEBUG("FAILED: release of slot(%u) >= free(%zu)", idx, pool->free);
 		return -EINVAL;
 	}
 
-	if (pool->allocated <= (pool->free + count)) {
-		err = xal_pool_grow(pool, pool->growby);
-		if (err) {
-			XAL_DEBUG("xal_pool_grow(); err(%d)", err);
-			return err;
-		}
-	}
-
-	if (idx) {
-		*idx = pool->free;
-	}
-	pool->free += count;
+	link = slot_at(pool, idx);
+	*link = pool->freelist_head;
+	pool->freelist_head = idx;
 
 	return 0;
 }
@@ -170,6 +214,7 @@ xal_pool_clear(struct xal_pool *pool)
 
 	pool->free = 0;
 	pool->allocated = 0;
+	pool->freelist_head = XAL_POOL_IDX_NONE;
 
 	return 0;
 }
