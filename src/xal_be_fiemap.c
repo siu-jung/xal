@@ -797,7 +797,7 @@ xal_build_lookup_hashmap(struct xal *xal)
 }
 
 int
-xal_get_inode(struct xal *xal, char *path, struct xal_inode **inode)
+xal_be_fiemap_get_inode(struct xal *xal, char *path, struct xal_inode **inode)
 {
 	struct xal_be_fiemap *be;
 	int err;

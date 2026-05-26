@@ -557,3 +557,35 @@ xal_extent_in_lba(struct xal *xal, const struct xal_extent *extent, struct xal_e
 
 	return 0;
 }
+
+int
+xal_get_inode(struct xal *xal, char *path, struct xal_inode **inode)
+{
+	struct xal_backend_base *be;
+	int err = 0;
+
+	if (!xal) {
+		XAL_DEBUG("FAILED: no xal given");
+		return -EINVAL;
+	}
+
+	if (!path) {
+		XAL_DEBUG("FAILED: no path given");
+		return -EINVAL;
+	}
+
+	be = (struct xal_backend_base *)&xal->be;
+
+	switch (be->type) {
+	case XAL_BACKEND_XFS:
+		XAL_DEBUG("Failed: xal_get_inode() not supported for XFS backend");
+		return -ENOSYS;
+	case XAL_BACKEND_FIEMAP:
+		return xal_be_fiemap_get_inode(xal, path, inode);
+	default:
+		XAL_DEBUG("Failed: Unknown backend type(%d)", be->type);
+		err = -EINVAL;
+	}
+
+	return err;
+}
