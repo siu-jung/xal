@@ -659,6 +659,11 @@ xal_get_inode(struct xal *xal, char *path, struct xal_inode **inode)
 		return -EINVAL;
 	}
 
+	if (atomic_load(xal->dirty)) {
+		XAL_DEBUG("FAILED: File system has changed");
+		return -ESTALE;
+	}
+
 	be = (struct xal_backend_base *)&xal->be;
 
 	switch (be->type) {

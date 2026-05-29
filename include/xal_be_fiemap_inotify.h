@@ -17,6 +17,19 @@ int
 xal_be_fiemap_inotify_init(struct xal_inotify *inotify, enum xal_watchmode watch_mode);
 
 /**
+ * Drain and discard all pending events from the inotify file descriptor.
+ *
+ * Call this at the start of xal_index(), before the re-walk, to discard
+ * events that accumulated while dirty was set. Events that arrive during
+ * the re-walk are left in the queue and will be picked up by the background
+ * thread once dirty is cleared.
+ *
+ * @param inotify  Pointer to the xal_inotify struct.
+ */
+int
+xal_be_fiemap_inotify_drain(struct xal_inotify *inotify);
+
+/**
  * Clear the watch descriptor to inode hash table on the given xal_inotify struct.
  * 
  * This is to be used when running xal_index() to ensure that the table points to

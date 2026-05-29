@@ -606,6 +606,12 @@ xal_be_fiemap_index(struct xal *xal)
 	xal_pool_clear(&xal->extents);
 
 	if (be->inotify) {
+		err = xal_be_fiemap_inotify_drain(be->inotify);
+		if (err) {
+			XAL_DEBUG("FAILED: xal_be_fiemap_inotify_drain(); err(%d)", err);
+			goto exit;
+		}
+
 		err = xal_be_fiemap_inotify_clear_inode_map(be->inotify);
 		if (err) {
 			XAL_DEBUG("FAILED: xal_be_fiemap_inotify_clear_inode_map(); err(%d)", err);
@@ -687,6 +693,11 @@ xal_build_lookup_hashmap(struct xal *xal)
 	if (be->base.type != XAL_BACKEND_FIEMAP) {
 		XAL_DEBUG("FAILED: xal not opened with backend FIEMAP");
 		return -EINVAL;
+	}
+
+	if (atomic_load(xal->dirty)) {
+		XAL_DEBUG("FAILED: File system has changed");
+		return -ESTALE;
 	}
 
 	if (be->path_inode_map) {

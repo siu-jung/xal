@@ -79,6 +79,24 @@ xal_be_fiemap_inotify_init(struct xal_inotify *inotify, enum xal_watchmode watch
 }
 
 int
+xal_be_fiemap_inotify_drain(struct xal_inotify *inotify)
+{
+	char buf[4096];
+	ssize_t len;
+
+	if (!inotify) {
+		XAL_DEBUG("FAILED: No inotify object given");
+		return -EINVAL;
+	}
+
+	do {
+		len = read(inotify->fd, buf, sizeof(buf));
+	} while (len > 0);
+
+	return 0;
+}
+
+int
 xal_be_fiemap_inotify_clear_inode_map(struct xal_inotify *inotify)
 {
 	khash_t(wd_to_inode) *inode_map;
