@@ -48,8 +48,11 @@ xal_be_fiemap_close(struct xal *xal)
 		int fd = open(be->mountpoint, O_RDONLY | O_DIRECTORY);
 
 		if (fd >= 0) {
-			if(ioctl(fd, FITHAW, 0) < 0) {
-				XAL_DEBUG("INFO: could not thaw filesystem; maybe nothing to thaw?");
+			int err = ioctl(fd, FITHAW, 0);
+			if (errno == EINVAL) {
+				XAL_DEBUG("INFO: FITHAW returned EINVAL; already thawed?");
+			} else if (err < 0) {
+				XAL_DEBUG("ERROR: could not thaw filesystem; errno(%d)", errno);
 			} else {
 				XAL_DEBUG("INFO: thawed filesystem");
 			}
@@ -200,13 +203,16 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 
 		// when ioctl returns, fs is fully frozen
 		err = ioctl(fd, FIFREEZE, 0);
-		if (err < 0) {
+		if (errno == EBUSY) {
+			XAL_DEBUG("INFO: FIFREEZE returned EBUSY; already frozen?");
+		} else if (err < 0) {
 			close(fd);
-			XAL_DEBUG("FAILED: could not freeze filesystem; err(%d)", err);
+			XAL_DEBUG("FAILED: could not freeze filesystem; errno(%d)", errno);
 			goto failed;
+		} else {
+			XAL_DEBUG("INFO: froze filesystem");
 		}
 		close(fd);
-		XAL_DEBUG("INFO: freezed filesystem");
 	}
 
 	nallocated = retrieve_total_entries(be->mountpoint);
