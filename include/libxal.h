@@ -45,9 +45,7 @@ enum xal_backend {
 
 enum xal_watchmode {
 	XAL_WATCHMODE_NONE             = 0,  ///< Nothing is watched and nothing is pinned: the extents are a snapshot of the filesystem as it was at xal_index() time, and a foreign write can invalidate them at any point. For a caller that owns the filesystem; see xal_mark_dirty() to signal a change made by the caller itself.
-	XAL_WATCHMODE_DIRTY_DETECTION  = 1,  ///< When changes to the file system occurs, the xal struct will become "dirty" indicating that the representation of the file system is stale.
-	XAL_WATCHMODE_EXTENT_UPDATE    = 2,  ///< When other changes to the file system occurs, the xal struct will be automatically updated if the extent information is the only subject to change, otherwise the xal struct will become "dirty" indicating that the representation of the file system is stale.
-	XAL_WATCHMODE_REFLINK_SNAPSHOT = 3,  ///< At xal_index() time, reflink every regular file (optionally restricted to opts.subtree) into a private snapshot and capture extents from the clones. The clones pin their blocks for the xal session, so the extents returned by xal_get_extents() stay valid under concurrent writes. No inotify watch is used; clones are removed at xal_close().
+	XAL_WATCHMODE_REFLINK_SNAPSHOT = 1,  ///< At xal_index() time, reflink every regular file (optionally restricted to opts.subtree) into a private snapshot and capture extents from the clones. The clones pin their blocks for as long as the index that produced them stands, so no foreign write can move a block out from under a published extent. What the pinning buys is not that extents never change but that only xal_index() can change them: a foreign write is undetectable in time, a re-snapshot is an event this library controls and reports by advancing the sequence lock. See xal_get_extents() for what a reader owes that contract, and xal_index() for what a re-snapshot does to the previous one. An inotify watch runs alongside: xal_is_dirty() becoming true means the filesystem has moved on, not that anything in hand went bad. Clones are removed at xal_close().
 };
 
 enum xal_file_lookupmode {
@@ -308,7 +306,14 @@ xal_dinodes_retrieve(struct xal *xal);
  * backend XAL_BACKEND_XFS.
  * 
  * When called, any index created from previous calls to xal_index() are cleared.
- * 
+ *
+ * In XAL_WATCHMODE_REFLINK_SNAPSHOT this re-snapshots, and the clones holding the previous
+ * index's blocks are destroyed before the new ones are made. Every extent the previous index
+ * produced is invalidated, and the blocks behind them stop being pinned. The sequence lock is
+ * advanced across the rebuild, which is what lets a reader following the protocol in
+ * xal_get_extents() find out; a reader that cached block addresses outside that protocol has no
+ * way to.
+ *
  * This function will fail if given a xal handle obtained from xal_from_shm().
  *
  * @returns On success, 0 is returned. On error, negative errno is returned to indicate the error.
@@ -469,6 +474,21 @@ xal_build_lookup_hashmap(struct xal *xal);
  * 
  * This will search through the tree at xal->root to find the inode. This call fails if the entry
  * at the given path is not a file.
+ *
+ * The result points into the pools -- shared memory for a handle from xal_from_shm() -- and
+ * struct xal_extents indexes those pools rather than carrying the block addresses, so this is a
+ * reference to live state, not a copy. It is valid for as long as the sequence lock is unchanged.
+ * Read it under the lock, and take the second reading after the reads it resolved have completed,
+ * not merely after issuing them:
+ *
+ *     do {
+ *             seq = xal_get_seq_lock(xal);
+ *             // resolve extents, issue the reads
+ *     } while (seq != xal_get_seq_lock(xal));
+ *
+ * A re-snapshot frees the blocks behind extents resolved under an earlier sequence number, so an
+ * I/O still in flight can land on blocks another file has since been given. The check after
+ * completion tells you the data is not trustworthy; it does not prevent the transfer.
  * 
  * @param xal The xal struct obtained when opened with xal_open()
  * @param path Absolute path to the file or directory. If opened with the XFS backend, the path should

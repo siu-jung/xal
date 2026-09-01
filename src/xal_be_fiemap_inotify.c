@@ -28,9 +28,6 @@
 
 KHASH_MAP_INIT_INT64(wd_to_inode, struct xal_inode *);
 
-int
-xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *inode);
-
 void
 xal_be_fiemap_inotify_close(struct xal_inotify *inotify)
 {
@@ -210,42 +207,35 @@ inotify_event_mask_pp(uint32_t mask, char *str, int str_sz) {
 }
 
 /**
- * Drain the inotify queue, applying incrementally what can be applied
+ * Drain the inotify queue and report whether the index must be rebuilt
  *
  * @return On success XAL_INOTIFY_NOCHANGE or XAL_INOTIFY_REINDEX is returned, the latter asking
  * the caller for a full re-index. On error, negative errno is returned and the watch is over.
  */
 static int
-check_events(struct xal *xal, struct xal_inotify *inotify)
+check_events(struct xal_inotify *inotify)
 {
-	struct xal_inode *dir_inode, *inode;
-	kh_wd_to_inode_t *inode_map;
 	char buf[4096] __attribute__ ((aligned(__alignof__(struct inotify_event))));
-	char path[XAL_PATH_MAXLEN];
-	khiter_t iter;
 	ssize_t len, i;
-	struct stat st;
-	int err;
-
-	inode_map = inotify->inode_map;
 
 	len = read(inotify->fd, buf, sizeof buf);
 	while (len > 0) {
-		int wd;
 		i = 0;
 
 		while (i < len) {
 			struct inotify_event *event = (struct inotify_event *)&buf[i];
 			__attribute__((unused)) char mask_pp[128];
 
-			inode = NULL;  // reset the pointer to the inode
-			wd = event->wd;
-
 			XAL_DEBUG_FCALL(inotify_event_mask_pp, event->mask, mask_pp, 128);
-			XAL_DEBUG("INFO: mask(%s) for event with wd(%d) and name(%s)", &mask_pp[1], wd, event->name)
+			/* len is 0 for events about the watched directory itself. */
+			XAL_DEBUG("INFO: mask(%s) for event with wd(%d) and name(%s)", &mask_pp[1], event->wd,
+				  event->len ? event->name : "(none)")
 
-			if (inotify->watch_mode == XAL_WATCHMODE_DIRTY_DETECTION) {
-				XAL_DEBUG("INFO: File system has changed;");
+			/* Events were dropped: wd is -1 and no name is carried, so nothing here can
+			 * say what changed. Checked first -- no watch mode can do better than a
+			 * re-index. */
+			if (event->mask & IN_Q_OVERFLOW) {
+				XAL_DEBUG("INFO: inotify queue overflowed; events were lost");
 				return XAL_INOTIFY_REINDEX;
 			}
 
@@ -256,90 +246,32 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				return -EINVAL;
 			}
 
-			if (event->mask & (IN_MODIFY | IN_CLOSE_WRITE)) {
-				iter = kh_get(wd_to_inode, inode_map, wd);
-				if (iter == kh_end(inode_map)) {
-					XAL_DEBUG("FAILED: kh_get(%d) for event with name(%s)", wd, event->name);
-					return XAL_INOTIFY_REINDEX;
-				}
-
-				XAL_DEBUG("INFO: found watch descriptor(%d) for event with name(%s)", wd, event->name);
-
-				dir_inode = kh_val(inode_map, iter);
-				if (!xal_inode_is_dir(dir_inode)) {
-					XAL_DEBUG("FAILED: found inode(%s) is not a directory", dir_inode->name);
-					return XAL_INOTIFY_REINDEX;
-				}
-
-				if (dir_inode->namelen + 1 + strlen(event->name) + 1 > sizeof(path)) {
-					XAL_DEBUG("FAILED: event(%s) full path too long(%zu)",
-							event->name, dir_inode->namelen + 1 + strlen(event->name) + 1);
-					return XAL_INOTIFY_REINDEX;
-				}
-				memcpy(path, dir_inode->name, dir_inode->namelen);
-				path[dir_inode->namelen] = '/';
-				memcpy(path + dir_inode->namelen + 1, event->name, strlen(event->name));
-				path[dir_inode->namelen + 1 + strlen(event->name)] = '\0';
-
-				XAL_DEBUG("INFO: got full path of event: %s", path);
-				atomic_fetch_add(xal->seq_lock, 1);
-
-				for (uint32_t j = 0; j < dir_inode->content.dentries.count; ++j) {
-					struct xal_inode *child = xal_inode_at(xal, dir_inode->content.dentries.inodes_idx + j);
-
-					if (strcmp(child->name, path) == 0) {
-						inode = child;
-						break;
-					}
-				}
-
-				if (!inode) {
-					XAL_DEBUG("FAILED: could not find child with name(%s)", event->name);
-					err = XAL_INOTIFY_REINDEX;
-					goto failed_with_lock;
-				}
-
-				XAL_DEBUG("INFO: reprocessing inode:");
-				XAL_DEBUG_FCALL(xal_inode_pp, xal, inode);
-
-				err = xal_be_fiemap_process_inode_file(xal, path, inode);
-				if (err) {
-					XAL_DEBUG("FAILED: xal_be_fiemap_process_inode_file(); err(%d)", err);
-					err = XAL_INOTIFY_REINDEX;
-					goto failed_with_lock;
-				}
-
-				// Update to new file size
-				err = stat(path, &st);
-				if (err) {
-					XAL_DEBUG("FAILED: stat(%s) errno(%d) while getting new file size", path, errno);
-					err = XAL_INOTIFY_REINDEX;
-					goto failed_with_lock;
-				}
-				inode->size = st.st_size;
-
-				XAL_DEBUG("INFO: finished reprocessing inode:");
-				XAL_DEBUG_FCALL(xal_inode_pp, xal, inode);
-
-				atomic_fetch_add(xal->seq_lock, 1);
-
-			} else if (event->mask & (IN_CREATE | IN_DELETE | IN_MOVE)) {
-				XAL_DEBUG("INFO: File system has changed, event mask:%s", mask_pp);
-				return XAL_INOTIFY_REINDEX;
+			/* Our own snapshot work lands in the watched mountpoint directory. What
+			 * happens inside a shadow dir is invisible -- the walk never descends into
+			 * one -- so dropping the event by name is what keeps a snapshot from
+			 * reporting itself as a change. */
+			if ((inotify->watch_mode == XAL_WATCHMODE_REFLINK_SNAPSHOT) && event->len &&
+			    (strncmp(event->name, XAL_SNAPSHOT_PREFIX,
+				     sizeof(XAL_SNAPSHOT_PREFIX) - 1) == 0)) {
+				XAL_DEBUG("INFO: ignoring own snapshot dir; name(%s)", event->name);
+				i += sizeof(struct inotify_event) + event->len;
+				continue;
 			}
 
-			i += sizeof(struct inotify_event) + event->len;
+			/* Every surviving event means the same thing. The clones hold the blocks,
+			 * so an event cannot invalidate extents a reader already has; it only says
+			 * a re-snapshot would see something different. No per-event incremental
+			 * path: re-reading extents for the changed file would take them from the
+			 * unpinned origin. */
+			XAL_DEBUG("INFO: file system moved on under the snapshot");
+
+			return XAL_INOTIFY_REINDEX;
 		}
 
 		len = read(inotify->fd, buf, sizeof buf);
 	}
 
 	return XAL_INOTIFY_NOCHANGE;
-
-failed_with_lock:
-	atomic_fetch_add(xal->seq_lock, 1);
-
-	return err;
 }
 
 static void *
@@ -410,9 +342,9 @@ background_thread_start(void *arg)
 			continue;
 		}
 
-		err = check_events(xal, be->inotify);
+		err = check_events(be->inotify);
 		if (err < 0) {
-			XAL_DEBUG("FAILED: xal_be_fiemap_inotify_check_events(), exit thread; err(%d)", err);
+			XAL_DEBUG("FAILED: check_events(), exit thread; err(%d)", err);
 			/* Nothing re-indexes once this loop is left, so leave the index dirty:
 			 * readers get -ESTALE instead of extents for a vanished filesystem. */
 			xal_mark_dirty(xal);

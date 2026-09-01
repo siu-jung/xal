@@ -9,7 +9,7 @@
 struct xal_inotify {
 	enum xal_watchmode watch_mode;
 	int fd;           ///< File descriptor for inotify events, if opened with some xal_watchmode, else 0
-	void *inode_map;  ///< Map of inodes from inotify watch descriptors
+	void *inode_map;  ///< Set of watch descriptors held by this instance
 	pthread_t watch_thread_id;
 	atomic_int flag;
 	atomic_bool stop;
