@@ -52,9 +52,6 @@ on_dirty(struct xal *xal, void *cb_args)
 	struct xal_server_watch *watch = cb_args;
 	int err;
 
-	/* xal_index() advances seq_lock on its exit path whether or not it succeeded, and the
-	 * watch loop fires again on any advance while the state is dirty. Returning without the
-	 * latch would rebuild the pools and emit LOG_CRIT back to back with nothing to stop it. */
 	if (watch->index_failed) {
 		return;
 	}
