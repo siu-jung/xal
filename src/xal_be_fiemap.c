@@ -959,15 +959,16 @@ xal_be_fiemap_index(struct xal *xal)
 	xal_pool_clear(&xal->extents);
 
 	if (be->inotify) {
-		err = xal_be_fiemap_inotify_drain(be->inotify);
-		if (err) {
-			XAL_DEBUG("FAILED: xal_be_fiemap_inotify_drain(); err(%d)", err);
-			goto exit;
-		}
-
+		/* Clear before draining: inotify_rm_watch() queues an IN_IGNORED per watch. */
 		err = xal_be_fiemap_inotify_clear_inode_map(be->inotify);
 		if (err) {
 			XAL_DEBUG("FAILED: xal_be_fiemap_inotify_clear_inode_map(); err(%d)", err);
+			goto exit;
+		}
+
+		err = xal_be_fiemap_inotify_drain(be->inotify);
+		if (err) {
+			XAL_DEBUG("FAILED: xal_be_fiemap_inotify_drain(); err(%d)", err);
 			goto exit;
 		}
 	}

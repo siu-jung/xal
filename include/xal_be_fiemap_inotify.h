@@ -8,7 +8,7 @@
 
 struct xal_inotify {
 	enum xal_watchmode watch_mode;
-	int fd;           ///< File descriptor for inotify events, if opened with some xal_watchmode, else 0
+	int fd;           ///< inotify descriptor, or -1 when no watch mode is in use
 	void *inode_map;  ///< Set of watch descriptors held by this instance
 	pthread_t watch_thread_id;
 	atomic_int flag;
@@ -37,11 +37,11 @@ int
 xal_be_fiemap_inotify_drain(struct xal_inotify *inotify);
 
 /**
- * Clear the watch descriptor to inode hash table on the given xal_inotify struct.
- * 
- * This is to be used when running xal_index() to ensure that the table points to
- * the correct inodes and none other.
- * 
+ * Drop every watch this instance holds, both the kernel watch and the map entry.
+ *
+ * Run before the drain in xal_index(), since each removal queues an IN_IGNORED. The walk
+ * re-adds a watch for every directory it reads.
+ *
  * @param inotify  Pointer to the xal_inotify struct.
  */
 int
