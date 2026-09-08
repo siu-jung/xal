@@ -13,6 +13,18 @@ struct xal_inotify {
 	pthread_t watch_thread_id;
 	atomic_int flag;
 	atomic_bool stop;
+
+	/**
+	 * Serialises starting the watch thread against reaping it.
+	 *
+	 * watch_thread_id is a plain pthread_t written by pthread_create() and read by every
+	 * reaper, so the flags alone cannot make the pair consistent: whichever side of
+	 * pthread_create() they are raised on, a reaper can observe one without the other and
+	 * either skip a join it owed or join an id nothing has written. Publishing the id and
+	 * the flags in one critical section removes that choice.
+	 */
+	pthread_mutex_t lifecycle;
+
 	xal_dirty_cb cb;
 	void *cb_args;
 };
