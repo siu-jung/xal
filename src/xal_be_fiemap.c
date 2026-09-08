@@ -586,6 +586,9 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 		err = xal_be_fiemap_inotify_init(be->inotify, opts->watch_mode);
 		if (err) {
 			XAL_DEBUG("FAILED: xal_be_fiemap_inotify_init()");
+			/* Released what it set up; close must not touch a mutex it never had. */
+			free(be->inotify);
+			be->inotify = NULL;
 			goto failed;
 		}
 	}
